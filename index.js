@@ -33,8 +33,8 @@ async function run() {
 		await client.connect();
 
 		const genealogyCommentCollection = client.db('Genealogy').collection('comments');
-		const genealogyEnglishCollection = client.db('Genealogy').collection('comments');
-		const genealogyBanglaCollection = client.db('Genealogy').collection('comments');
+		const genealogyEnglishCollection = client.db('Genealogy').collection('genealogy_english');
+		const genealogyBanglaCollection = client.db('Genealogy').collection('genealogy_bangla');
 
 		app.get('/genealogy_english', async(req, res) => {
 			const result = await genealogyEnglishCollection.find().toArray();
