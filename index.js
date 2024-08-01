@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
-
 const app = express();
 const port = process.env.PORT || 2000;
 
@@ -36,12 +35,13 @@ async function run() {
 		const genealogyEnglishCollection = client.db('Genealogy').collection('genealogy_english');
 		const genealogyBanglaCollection = client.db('Genealogy').collection('genealogy_bangla');
 
-		app.get('/genealogy_english', async(req, res) => {
+
+		app.get('/genealogyEnglish', async(req, res) => {
 			const result = await genealogyEnglishCollection.find().toArray();
 			res.send(result);
 		})
 
-		app.get('/genealogy_bangla', async(req, res) => {
+		app.get('/genealogyBangla', async(req, res) => {
 			const result = await genealogyBanglaCollection.find().toArray();
 			res.send(result);
 		})
