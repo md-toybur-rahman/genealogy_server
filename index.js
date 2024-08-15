@@ -34,19 +34,20 @@ async function run() {
 		const genealogyCommentCollection = client.db('Genealogy').collection('comments');
 		const genealogyEnglishCollection = client.db('Genealogy').collection('genealogy_english');
 		const genealogyBanglaCollection = client.db('Genealogy').collection('genealogy_bangla');
+		const usersCollection = client.db('Genealogy').collection('users');
 
 
-		app.get('/genealogyEnglish', async(req, res) => {
+		app.get('/genealogyEnglish', async (req, res) => {
 			const result = await genealogyEnglishCollection.find().toArray();
 			res.send(result);
 		})
 
-		app.get('/genealogyBangla', async(req, res) => {
+		app.get('/genealogyBangla', async (req, res) => {
 			const result = await genealogyBanglaCollection.find().toArray();
 			res.send(result);
 		})
 
-		app.get('/comments', async(req, res) => {
+		app.get('/comments', async (req, res) => {
 			const result = await genealogyCommentCollection.find().toArray();
 			res.send(result);
 		})
@@ -55,6 +56,39 @@ async function run() {
 			const comment = req.body;
 			const result = await genealogyCommentCollection.insertOne(comment);
 			res.send(result)
+		})
+
+		app.post('/users', async (req, res) => {
+			const userData = req.body;
+			console.log(userData.fathers_name)
+			const name = userData.name;
+			const fathers_name = userData.fathers_name;
+			const phone = userData.phone_number;
+			const isExist = await usersCollection.findOne({ phone_number: phone });
+			if (isExist) {
+				if(name && fathers_name) {
+					res.send({message: 'user already exist'})
+				}
+				else {
+					res.send({ message: 'authorized user' })
+				}
+			}
+			else {
+				if(name && fathers_name) {
+					const result = await usersCollection.insertOne(userData);
+					res.send(result);
+				}
+				else {
+					res.send({ message: 'new user'})
+				}
+			}
+		})
+
+		app.get('/users', async (req, res) => {
+			const number = req.query.number;
+			const result = await usersCollection.findOne({ phone_number: number })
+			console.log(result)
+			res.send(result);
 		})
 
 
