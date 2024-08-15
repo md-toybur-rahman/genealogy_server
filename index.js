@@ -85,9 +85,7 @@ async function run() {
 		})
 
 		app.get('/users', async (req, res) => {
-			const number = req.body.phone_number;
-			const result = await usersCollection.findOne({ phone_number: number })
-			console.log(result)
+			const result = await usersCollection.find().toArray();
 			res.send(result);
 		})
 
