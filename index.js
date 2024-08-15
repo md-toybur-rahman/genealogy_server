@@ -65,27 +65,27 @@ async function run() {
 			const fathers_name = userData.fathers_name;
 			const phone = userData.phone_number;
 			const isExist = await usersCollection.findOne({ phone_number: phone });
-			if (isExist) {
+			if (!isExist) {
 				if(name && fathers_name) {
-					res.send({message: 'user already exist'})
+					const result = await usersCollection.insertOne(userData);
+					return res.send(result);
 				}
 				else {
-					res.send({ message: 'authorized user' })
+					return res.send({ message: 'new user'})
 				}
 			}
 			else {
 				if(name && fathers_name) {
-					const result = await usersCollection.insertOne(userData);
-					res.send(result);
+					return res.send({message: 'user already exist'})
 				}
 				else {
-					res.send({ message: 'new user'})
+					return res.send({ message: 'authorized user' })
 				}
 			}
 		})
 
 		app.get('/users', async (req, res) => {
-			const number = req.query.number;
+			const number = req.body.phone_number;
 			const result = await usersCollection.findOne({ phone_number: number })
 			console.log(result)
 			res.send(result);
