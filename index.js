@@ -61,27 +61,23 @@ async function run() {
 		app.post('/users', async (req, res) => {
 			const userData = req.body;
 			console.log(userData.fathers_name)
-			const name = userData.name;
-			const fathers_name = userData.fathers_name;
-			const phone = userData.phone_number;
-			const isExist = await usersCollection.findOne({ phone_number: phone });
-			if (!isExist) {
-				if(name && fathers_name) {
-					const result = await usersCollection.insertOne(userData);
-					return res.send(result);
-				}
-				else {
-					return res.send({ message: 'new user'})
-				}
-			}
-			else {
-				if(name && fathers_name) {
-					return res.send({message: 'user already exist'})
-				}
-				else {
-					return res.send({ message: 'authorized user' })
+			const result = await usersCollection.insertOne(userData);
+			return res.send(result);
+		})
+		app.put('/users/:id', async(req, res) => {
+			const id = req.params.id;
+			const filter = {_id: new ObjectId(id)};
+			const options = {upsert: true};
+			const updatedData = req.body;
+			const user = {
+				$set: {
+					name: updatedData.name,
+					fathers_name: updatedData.fathers_name,
+					phone_number: updatedData.phone_number
 				}
 			}
+			const result = await usersCollection.updateOne(filter, user, options);
+			res.send(result)
 		})
 
 		app.get('/users', async (req, res) => {
