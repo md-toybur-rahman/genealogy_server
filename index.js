@@ -35,8 +35,9 @@ async function run() {
 		const genealogyEnglishCollection = client.db('Genealogy').collection('genealogy_english');
 		const genealogyBanglaCollection = client.db('Genealogy').collection('genealogy_bangla');
 		const usersCollection = client.db('Genealogy').collection('users');
+		// const testingCollection = client.db('Genealogy').collection('testing_data');
 
-
+		
 		app.get('/genealogyEnglish', async (req, res) => {
 			const result = await genealogyEnglishCollection.find().toArray();
 			res.send(result);
