@@ -68,8 +68,9 @@ async function verifyFirebaseToken(req) {
 }
 
 function profileComplete(profile) {
-	return Boolean(profile?.name?.trim() && profile?.bangla_name?.trim() && profile?.fathers_name?.trim() &&
-		profile?.phone_number?.trim() && normalizePhotoUrl(profile?.photoURL) && ['public', 'private'].includes(profile.phone_visibility));
+	return Boolean(profile?.name?.trim() && profile?.bangla_name?.trim() && (profile?.is_family_member === true || profile?.fathers_name?.trim()) &&
+		profile?.phone_number?.trim() && normalizePhotoUrl(profile?.photoURL) && ['public', 'private'].includes(profile.phone_visibility) &&
+		typeof profile.is_family_member === 'boolean' && (!profile.is_family_member || (typeof profile.family_member_id === 'string' && profile.family_member_id.trim())));
 }
 
 function isValidPath(path) {
@@ -86,11 +87,11 @@ function getNodeAtPath(root, path) {
 	return node;
 }
 
-function appendMember(root, path, name) {
+function appendMember(root, path, name, familyMemberId, photoURL = '') {
 	const parent = getNodeAtPath(root, path);
 	if (!parent || !Array.isArray(parent.children)) return 'missing_parent';
 	if (parent.children.some(child => child.name?.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) return 'duplicate';
-	parent.children.push({ name, children: [] });
+	parent.children.push({ name, familyMemberId, ...(photoURL ? { photoURL } : {}), children: [] });
 	return 'added';
 }
 
@@ -119,6 +120,71 @@ function normalizePhotoUrl(value) {
 	}
 }
 
+function assignPairedMemberIds(englishRoot, banglaRoot) {
+	let changedEnglish = false;
+	let changedBangla = false;
+	function visit(englishNode, banglaNode) {
+		if (!englishNode || !banglaNode) return;
+		let memberId = englishNode.familyMemberId || banglaNode.familyMemberId;
+		if (!memberId) memberId = crypto.randomUUID();
+		if (!englishNode.familyMemberId) { englishNode.familyMemberId = memberId; changedEnglish = true; }
+		if (!banglaNode.familyMemberId) { banglaNode.familyMemberId = memberId; changedBangla = true; }
+		const englishChildren = englishNode.children || [];
+		const banglaChildren = banglaNode.children || [];
+		for (let i = 0; i < Math.min(englishChildren.length, banglaChildren.length); i++) visit(englishChildren[i], banglaChildren[i]);
+	}
+	visit(englishRoot, banglaRoot);
+	return { changedEnglish, changedBangla };
+}
+
+function listFamilyMembers(englishRoot, banglaRoot) {
+	const members = new Map();
+	function visitEnglish(node, fatherName = '') {
+		if (!node) return;
+		if (node.familyMemberId) members.set(node.familyMemberId, { family_member_id: node.familyMemberId, name: node.name, fathers_name: fatherName });
+		for (const child of node.children || []) visitEnglish(child, node.name);
+	}
+	function visitBangla(node, fatherName = '') {
+		if (!node) return;
+		if (node.familyMemberId && members.has(node.familyMemberId)) {
+			const member = members.get(node.familyMemberId);
+			member.bangla_name = node.name;
+			member.bangla_fathers_name = fatherName;
+		}
+		for (const child of node.children || []) visitBangla(child, node.name);
+	}
+	visitEnglish(englishRoot);
+	visitBangla(banglaRoot);
+	return [...members.values()].filter(member => member.bangla_name);
+}
+
+function findMemberNodeById(root, familyMemberId) {
+	if (!root || !familyMemberId) return null;
+	if (root.familyMemberId === familyMemberId) return root;
+	for (const child of root.children || []) {
+		const found = findMemberNodeById(child, familyMemberId);
+		if (found) return found;
+	}
+	return null;
+}
+
+function collectMemberProfiles(englishRoot, banglaRoot) {
+	const members = new Map();
+	function visitEnglish(node, fatherName = '') {
+		if (!node) return;
+		if (node.familyMemberId) members.set(node.familyMemberId, { name: node.name, fathers_name: fatherName });
+		for (const child of node.children || []) visitEnglish(child, node.name);
+	}
+	function visitBangla(node) {
+		if (!node) return;
+		if (node.familyMemberId && members.has(node.familyMemberId)) members.get(node.familyMemberId).bangla_name = node.name;
+		for (const child of node.children || []) visitBangla(child);
+	}
+	visitEnglish(englishRoot);
+	visitBangla(banglaRoot);
+	return members;
+}
+
 async function run() {
 	await client.connect();
 	const db = client.db('Genealogy');
@@ -127,6 +193,12 @@ async function run() {
 	const banglaTree = db.collection('genealogy_bangla');
 	const users = db.collection('users');
 	const requests = db.collection('family_requests');
+	const [initialEnglishTree, initialBanglaTree] = await Promise.all([englishTree.findOne({}), banglaTree.findOne({})]);
+	if (initialEnglishTree && initialBanglaTree) {
+		const { changedEnglish, changedBangla } = assignPairedMemberIds(initialEnglishTree, initialBanglaTree);
+		if (changedEnglish) await englishTree.updateOne({ _id: initialEnglishTree._id }, { $set: { children: initialEnglishTree.children, familyMemberId: initialEnglishTree.familyMemberId } });
+		if (changedBangla) await banglaTree.updateOne({ _id: initialBanglaTree._id }, { $set: { children: initialBanglaTree.children, familyMemberId: initialBanglaTree.familyMemberId } });
+	}
 	const bootstrapAdminEmail = process.env.GENEALOGY_ADMIN_EMAIL?.trim().toLowerCase();
 	if (bootstrapAdminEmail) {
 		await users.updateOne({ email: bootstrapAdminEmail, user_type: { $nin: ['user', 'admin'] } }, { $set: { user_type: 'admin' } });
@@ -149,6 +221,8 @@ async function run() {
 				phone_number: '',
 				phone_visibility: 'private',
 				photoURL: '',
+				is_family_member: null,
+				family_member_id: null,
 				user_type: defaultRole,
 				createdAt: new Date(),
 				updatedAt: new Date(),
@@ -182,22 +256,41 @@ async function run() {
 	app.get('/genealogyBangla', authenticate({ complete: true }), async (req, res) => res.json(await banglaTree.find().toArray()));
 
 	app.get('/users/me', authenticate(), (req, res) => {
-		const { _id, email, name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, user_type } = req.profile;
-		return res.json({ _id, email, name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, user_type, profile_complete: profileComplete(req.profile) });
+		const { _id, email, name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, user_type, is_family_member, family_member_id } = req.profile;
+		return res.json({ _id, email, name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, user_type, is_family_member, family_member_id, profile_complete: profileComplete(req.profile) });
 	});
 
 	app.put('/users/me', authenticate(), async (req, res) => {
-		const { name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL } = req.body;
-		const values = [name, bangla_name, fathers_name, phone_number];
-		if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120) ||
-			!['public', 'private'].includes(phone_visibility) || !normalizePhotoUrl(photoURL)) {
-			return res.status(400).json({ message: 'নাম, বাবার নাম, মোবাইল নম্বর, ছবি ও privacy নির্বাচন পূরণ করুন। Imgbb-র ছবি ব্যবহার করুন।' });
+		const { name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, is_family_member, family_member_id } = req.body || {};
+		if (typeof is_family_member !== 'boolean' || !['public', 'private'].includes(phone_visibility) ||
+			typeof phone_number !== 'string' || !phone_number.trim() || phone_number.trim().length > 120 || !normalizePhotoUrl(photoURL)) {
+			return res.status(400).json({ message: 'পরিবারের সদস্য কি না, মোবাইল, ছবি ও privacy নির্বাচন পূরণ করুন।' });
+		}
+		let profileNames;
+		if (is_family_member) {
+			if (typeof family_member_id !== 'string') return res.status(400).json({ message: 'পরিবারের তালিকা থেকে নিজের নাম বেছে নিন।' });
+			const [enRoot, bnRoot] = await Promise.all([englishTree.findOne({}), banglaTree.findOne({})]);
+			profileNames = listFamilyMembers(enRoot, bnRoot).find(member => member.family_member_id === family_member_id);
+			if (!profileNames) return res.status(400).json({ message: 'পরিবারের তালিকায় সদস্যটিকে পাওয়া যায়নি। Tree refresh করে আবার বেছে নিন।' });
+		} else {
+			const values = [name, bangla_name, fathers_name];
+			if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120)) {
+				return res.status(400).json({ message: 'নিজের English ও বাংলা নাম এবং বাবার নাম দিন।' });
+			}
+			profileNames = { name: name.trim(), bangla_name: bangla_name.trim(), fathers_name: fathers_name.trim() };
 		}
 		await users.updateOne({ _id: req.profile._id }, { $set: {
-			name: name.trim(), bangla_name: bangla_name.trim(), fathers_name: fathers_name.trim(),
-			phone_number: phone_number.trim(), phone_visibility, photoURL: normalizePhotoUrl(photoURL), updatedAt: new Date(),
+			...profileNames,
+			phone_number: phone_number.trim(), phone_visibility, photoURL: normalizePhotoUrl(photoURL),
+			is_family_member, family_member_id: is_family_member ? family_member_id : null, updatedAt: new Date(),
 		} });
 		return res.json({ message: 'Profile সংরক্ষণ হয়েছে।' });
+	});
+
+	app.get('/family/members', authenticate(), async (req, res) => {
+		const [enRoot, bnRoot] = await Promise.all([englishTree.findOne({}), banglaTree.findOne({})]);
+		if (!enRoot || !bnRoot) return res.status(503).json({ message: 'Family tree load করা যায়নি।' });
+		return res.json(listFamilyMembers(enRoot, bnRoot));
 	});
 
 	app.post('/images/profile', authenticate(), async (req, res) => {
@@ -229,7 +322,7 @@ async function run() {
 			const canSeePhone = isAdmin || person._id.equals(req.profile._id) || person.phone_visibility === 'public';
 			return {
 				_id: person._id, name: person.name, bangla_name: person.bangla_name,
-				fathers_name: person.fathers_name, photoURL: person.photoURL,
+				fathers_name: person.fathers_name, photoURL: person.photoURL, family_member_id: person.family_member_id || null,
 				phone_number: canSeePhone ? person.phone_number : null,
 				phone_visibility: person.phone_visibility, user_type: person.user_type,
 			};
@@ -240,9 +333,9 @@ async function run() {
 		const { type } = req.body || {};
 		let request;
 		if (type === 'member_add') {
-			const { englishName, banglaName, parentEnglishPath, parentBanglaPath } = req.body;
+			const { englishName, banglaName, parentEnglishPath, parentBanglaPath, photoURL } = req.body;
 			if (![englishName, banglaName].every(value => typeof value === 'string' && value.trim() && value.trim().length <= 120) ||
-				!isValidPath(parentEnglishPath) || !isValidPath(parentBanglaPath)) {
+				!isValidPath(parentEnglishPath) || !isValidPath(parentBanglaPath) || (photoURL && !normalizePhotoUrl(photoURL))) {
 				return res.status(400).json({ message: 'দুই ভাষার নাম ও দুই tree-তে বাবা/মা নির্বাচন করুন।' });
 			}
 			const enRoot = await englishTree.findOne({});
@@ -254,11 +347,13 @@ async function run() {
 			}
 			request = {
 				type, englishName: englishName.trim(), banglaName: banglaName.trim(), parentEnglishPath, parentBanglaPath,
+				familyMemberId: crypto.randomUUID(), photoURL: photoURL ? normalizePhotoUrl(photoURL) : '',
 				expectedEnglishParentName: englishParent.name, expectedBanglaParentName: banglaParent.name,
 			};
 		} else if (type === 'name_correction') {
-			const { language, targetPath, proposedName } = req.body;
+			const { language, targetPath, proposedName, field = 'name' } = req.body;
 			if (!['english', 'bangla'].includes(language) || !isValidPath(targetPath) ||
+				!['name', 'fathers_name'].includes(field) ||
 				typeof proposedName !== 'string' || !proposedName.trim() || proposedName.trim().length > 120) {
 				return res.status(400).json({ message: 'নতুন নাম ও সদস্য নির্বাচন করুন।' });
 			}
@@ -266,7 +361,7 @@ async function run() {
 			const root = await collection.findOne({});
 			const currentNode = root && getNodeAtPath(root, targetPath);
 			if (!currentNode) return res.status(404).json({ message: 'নির্বাচিত সদস্যকে পাওয়া যায়নি।' });
-			request = { type, language, targetPath, expectedName: currentNode.name, proposedName: proposedName.trim() };
+			request = { type, language, field, targetPath, expectedName: currentNode.name, familyMemberId: currentNode.familyMemberId, proposedName: proposedName.trim() };
 		} else {
 			return res.status(400).json({ message: 'Request-এর ধরন সঠিক নয়।' });
 		}
@@ -303,16 +398,22 @@ async function run() {
 					if (!enRoot || !bnRoot) throw new Error('TREE_NOT_INITIALIZED');
 					if (getNodeAtPath(enRoot, request.parentEnglishPath)?.name !== request.expectedEnglishParentName ||
 						getNodeAtPath(bnRoot, request.parentBanglaPath)?.name !== request.expectedBanglaParentName) throw new Error('PARENT_CHANGED');
-					const enResult = appendMember(enRoot, request.parentEnglishPath, request.englishName);
-					const bnResult = appendMember(bnRoot, request.parentBanglaPath, request.banglaName);
+					const enResult = appendMember(enRoot, request.parentEnglishPath, request.englishName, request.familyMemberId, request.photoURL);
+					const bnResult = appendMember(bnRoot, request.parentBanglaPath, request.banglaName, request.familyMemberId, request.photoURL);
 					if (enResult !== 'added' || bnResult !== 'added') throw new Error(enResult === 'duplicate' || bnResult === 'duplicate' ? 'DUPLICATE_MEMBER' : 'PARENT_NOT_FOUND');
 					await englishTree.updateOne({ _id: enRoot._id }, { $set: { name: enRoot.name, children: enRoot.children } }, { session });
 					await banglaTree.updateOne({ _id: bnRoot._id }, { $set: { name: bnRoot.name, children: bnRoot.children } }, { session });
 				} else if (req.body.decision === 'approved' && request.type === 'name_correction') {
 					const collection = request.language === 'english' ? englishTree : banglaTree;
 					const root = await collection.findOne({}, { session });
-					if (!root || !setNodeNameAtPath(root, request.targetPath, request.expectedName, request.proposedName)) throw new Error('MEMBER_CHANGED');
+					const target = root && getNodeAtPath(root, request.targetPath);
+					if (!target || target.familyMemberId !== request.familyMemberId || !setNodeNameAtPath(root, request.targetPath, request.expectedName, request.proposedName)) throw new Error('MEMBER_CHANGED');
 					await collection.updateOne({ _id: root._id }, { $set: { name: root.name, children: root.children } }, { session });
+					const enRoot = request.language === 'english' ? root : await englishTree.findOne({}, { session });
+					const bnRoot = request.language === 'bangla' ? root : await banglaTree.findOne({}, { session });
+					for (const [familyMemberId, names] of collectMemberProfiles(enRoot, bnRoot)) {
+						await users.updateMany({ family_member_id: familyMemberId, is_family_member: true }, { $set: { ...names, updatedAt: new Date() } }, { session });
+					}
 				}
 				const result = await requests.updateOne({ _id: requestId, status: 'pending' }, { $set: {
 					status: req.body.decision, reviewedBy: req.profile._id, reviewedAt: new Date(),
