@@ -286,9 +286,13 @@ async function run() {
 			}
 			profileNames = { name: name.trim(), bangla_name: bangla_name.trim(), fathers_name: fathers_name.trim() };
 		}
+		const normalizedPhotoURL = normalizePhotoUrl(photoURL);
+		if (req.profile.is_family_member && normalizePhotoUrl(req.profile.photoURL) && normalizePhotoUrl(req.profile.photoURL) !== normalizedPhotoURL) {
+			return res.status(409).json({ message: 'পরিবারের tree-তে যুক্ত ছবিটি বদলাতে member-এর photo modal থেকে request পাঠান।' });
+		}
 		await users.updateOne({ _id: req.profile._id }, { $set: {
 			...profileNames,
-			phone_number: phone_number.trim(), phone_visibility, photoURL: normalizePhotoUrl(photoURL),
+			phone_number: phone_number.trim(), phone_visibility, photoURL: normalizedPhotoURL,
 			is_family_member, family_member_id: is_family_member ? family_member_id : null, updatedAt: new Date(),
 		} });
 		return res.json({ message: 'Profile সংরক্ষণ হয়েছে।' });
@@ -357,8 +361,8 @@ async function run() {
 				familyMemberId: crypto.randomUUID(), photoURL: photoURL ? normalizePhotoUrl(photoURL) : '',
 				expectedEnglishParentName: englishParent.name, expectedBanglaParentName: banglaParent.name,
 			};
-		} else if (type === 'photo_add') {
-			const { language, targetPath, familyMemberId, photoURL } = req.body;
+		} else if (type === 'photo_add' || type === 'photo_change') {
+			const { language, targetPath, familyMemberId, photoURL, expectedPhotoURL } = req.body;
 			if (!['english', 'bangla'].includes(language) || !isValidPath(targetPath) ||
 				typeof familyMemberId !== 'string' || !normalizePhotoUrl(photoURL)) {
 				return res.status(400).json({ message: 'Member নির্বাচন করে সঠিক ছবি দিন।' });
@@ -367,8 +371,11 @@ async function run() {
 			const root = await collection.findOne({});
 			const member = root && getNodeAtPath(root, targetPath);
 			if (!member || member.familyMemberId !== familyMemberId) return res.status(409).json({ message: 'Member-এর অবস্থান বদলেছে। Tree reload করে আবার চেষ্টা করুন।' });
-			if (member.photoURL || findMemberNodeById(root, familyMemberId)?.photoURL) return res.status(409).json({ message: 'এই member-এর ছবি ইতিমধ্যে যুক্ত আছে।' });
-			request = { type, language, targetPath, familyMemberId, expectedName: member.name, photoURL: normalizePhotoUrl(photoURL) };
+			const linkedProfile = await users.findOne({ family_member_id: familyMemberId, is_family_member: true }, { projection: { photoURL: 1 } });
+			const currentPhotoURL = linkedProfile?.photoURL || member.photoURL || '';
+			if (type === 'photo_add' && currentPhotoURL) return res.status(409).json({ message: 'এই member-এর ছবি ইতিমধ্যে যুক্ত আছে। ছবি পরিবর্তনের request দিন।' });
+			if (type === 'photo_change' && (!currentPhotoURL || expectedPhotoURL !== currentPhotoURL)) return res.status(409).json({ message: 'বর্তমান ছবিটি বদলে গেছে। Tree reload করে আবার চেষ্টা করুন।' });
+			request = { type, language, targetPath, familyMemberId, expectedName: member.name, photoURL: normalizePhotoUrl(photoURL), expectedPhotoURL: currentPhotoURL, previousPhotoURL: currentPhotoURL };
 		} else if (type === 'name_correction') {
 			const { language, targetPath, proposedName, field = 'name' } = req.body;
 			if (!['english', 'bangla'].includes(language) || !isValidPath(targetPath) ||
@@ -433,17 +440,24 @@ async function run() {
 					for (const [familyMemberId, names] of collectMemberProfiles(enRoot, bnRoot)) {
 						await users.updateMany({ family_member_id: familyMemberId, is_family_member: true }, { $set: { ...names, updatedAt: new Date() } }, { session });
 					}
-				} else if (req.body.decision === 'approved' && request.type === 'photo_add') {
+				} else if (req.body.decision === 'approved' && ['photo_add', 'photo_change'].includes(request.type)) {
 					const enRoot = await englishTree.findOne({}, { session });
 					const bnRoot = await banglaTree.findOne({}, { session });
 					if (!enRoot || !bnRoot) throw new Error('TREE_NOT_INITIALIZED');
 					const selectedRoot = request.language === 'english' ? enRoot : bnRoot;
 					const selectedNode = getNodeAtPath(selectedRoot, request.targetPath);
 					if (!selectedNode || selectedNode.familyMemberId !== request.familyMemberId || selectedNode.name !== request.expectedName) throw new Error('MEMBER_CHANGED');
-					if (findMemberNodeById(enRoot, request.familyMemberId)?.photoURL || findMemberNodeById(bnRoot, request.familyMemberId)?.photoURL) throw new Error('PHOTO_ALREADY_SET');
+					const englishMember = findMemberNodeById(enRoot, request.familyMemberId);
+					const banglaMember = findMemberNodeById(bnRoot, request.familyMemberId);
+					if (!englishMember || !banglaMember) throw new Error('MEMBER_CHANGED');
+					const linkedProfile = await users.findOne({ family_member_id: request.familyMemberId, is_family_member: true }, { session, projection: { photoURL: 1 } });
+					const currentPhotoURL = linkedProfile?.photoURL || englishMember.photoURL || banglaMember.photoURL || '';
+					if (request.type === 'photo_add' && currentPhotoURL) throw new Error('PHOTO_ALREADY_SET');
+					if (request.type === 'photo_change' && currentPhotoURL !== request.expectedPhotoURL) throw new Error('PHOTO_CHANGED');
 					if (!setMemberPhotoById(enRoot, request.familyMemberId, request.photoURL) || !setMemberPhotoById(bnRoot, request.familyMemberId, request.photoURL)) throw new Error('MEMBER_CHANGED');
 					await englishTree.updateOne({ _id: enRoot._id }, { $set: { name: enRoot.name, children: enRoot.children } }, { session });
 					await banglaTree.updateOne({ _id: bnRoot._id }, { $set: { name: bnRoot.name, children: bnRoot.children } }, { session });
+					await users.updateMany({ family_member_id: request.familyMemberId, is_family_member: true }, { $set: { photoURL: request.photoURL, updatedAt: new Date() } }, { session });
 				}
 				const result = await requests.updateOne({ _id: requestId, status: 'pending' }, { $set: {
 					status: req.body.decision, reviewedBy: req.profile._id, reviewedAt: new Date(),
@@ -457,6 +471,7 @@ async function run() {
 				TREE_NOT_INITIALIZED: [503, 'Database-এ family tree নেই।'],
 				DUPLICATE_MEMBER: [409, 'একই বাবা/মায়ের অধীনে এই নামের সদস্য আগে থেকেই আছে।'],
 				PHOTO_ALREADY_SET: [409, 'এই member-এর ছবি আগেই যুক্ত হয়েছে।'],
+				PHOTO_CHANGED: [409, 'Request করার পর member-এর ছবি বদলে গেছে। নতুন request দিন।'],
 				PARENT_NOT_FOUND: [409, 'নির্বাচিত বাবা/মাকে tree-তে পাওয়া যায়নি।'],
 				PARENT_CHANGED: [409, 'Request করার পর নির্বাচিত বাবা/মায়ের tree position বদলেছে; আবার request দিন।'],
 				MEMBER_CHANGED: [409, 'Request করার পর সদস্যের অবস্থান বা নাম বদলেছে; নতুন request নিন।'],
