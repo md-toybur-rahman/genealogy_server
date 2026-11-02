@@ -168,6 +168,13 @@ function findMemberNodeById(root, familyMemberId) {
 	return null;
 }
 
+function setMemberPhotoById(root, familyMemberId, photoURL) {
+	const member = findMemberNodeById(root, familyMemberId);
+	if (!member) return false;
+	member.photoURL = photoURL;
+	return true;
+}
+
 function collectMemberProfiles(englishRoot, banglaRoot) {
 	const members = new Map();
 	function visitEnglish(node, fatherName = '') {
@@ -350,6 +357,18 @@ async function run() {
 				familyMemberId: crypto.randomUUID(), photoURL: photoURL ? normalizePhotoUrl(photoURL) : '',
 				expectedEnglishParentName: englishParent.name, expectedBanglaParentName: banglaParent.name,
 			};
+		} else if (type === 'photo_add') {
+			const { language, targetPath, familyMemberId, photoURL } = req.body;
+			if (!['english', 'bangla'].includes(language) || !isValidPath(targetPath) ||
+				typeof familyMemberId !== 'string' || !normalizePhotoUrl(photoURL)) {
+				return res.status(400).json({ message: 'Member নির্বাচন করে সঠিক ছবি দিন।' });
+			}
+			const collection = language === 'english' ? englishTree : banglaTree;
+			const root = await collection.findOne({});
+			const member = root && getNodeAtPath(root, targetPath);
+			if (!member || member.familyMemberId !== familyMemberId) return res.status(409).json({ message: 'Member-এর অবস্থান বদলেছে। Tree reload করে আবার চেষ্টা করুন।' });
+			if (member.photoURL || findMemberNodeById(root, familyMemberId)?.photoURL) return res.status(409).json({ message: 'এই member-এর ছবি ইতিমধ্যে যুক্ত আছে।' });
+			request = { type, language, targetPath, familyMemberId, expectedName: member.name, photoURL: normalizePhotoUrl(photoURL) };
 		} else if (type === 'name_correction') {
 			const { language, targetPath, proposedName, field = 'name' } = req.body;
 			if (!['english', 'bangla'].includes(language) || !isValidPath(targetPath) ||
@@ -414,6 +433,17 @@ async function run() {
 					for (const [familyMemberId, names] of collectMemberProfiles(enRoot, bnRoot)) {
 						await users.updateMany({ family_member_id: familyMemberId, is_family_member: true }, { $set: { ...names, updatedAt: new Date() } }, { session });
 					}
+				} else if (req.body.decision === 'approved' && request.type === 'photo_add') {
+					const enRoot = await englishTree.findOne({}, { session });
+					const bnRoot = await banglaTree.findOne({}, { session });
+					if (!enRoot || !bnRoot) throw new Error('TREE_NOT_INITIALIZED');
+					const selectedRoot = request.language === 'english' ? enRoot : bnRoot;
+					const selectedNode = getNodeAtPath(selectedRoot, request.targetPath);
+					if (!selectedNode || selectedNode.familyMemberId !== request.familyMemberId || selectedNode.name !== request.expectedName) throw new Error('MEMBER_CHANGED');
+					if (findMemberNodeById(enRoot, request.familyMemberId)?.photoURL || findMemberNodeById(bnRoot, request.familyMemberId)?.photoURL) throw new Error('PHOTO_ALREADY_SET');
+					if (!setMemberPhotoById(enRoot, request.familyMemberId, request.photoURL) || !setMemberPhotoById(bnRoot, request.familyMemberId, request.photoURL)) throw new Error('MEMBER_CHANGED');
+					await englishTree.updateOne({ _id: enRoot._id }, { $set: { name: enRoot.name, children: enRoot.children } }, { session });
+					await banglaTree.updateOne({ _id: bnRoot._id }, { $set: { name: bnRoot.name, children: bnRoot.children } }, { session });
 				}
 				const result = await requests.updateOne({ _id: requestId, status: 'pending' }, { $set: {
 					status: req.body.decision, reviewedBy: req.profile._id, reviewedAt: new Date(),
@@ -426,6 +456,7 @@ async function run() {
 				REQUEST_NOT_PENDING: [409, 'এই request আর pending নেই।'],
 				TREE_NOT_INITIALIZED: [503, 'Database-এ family tree নেই।'],
 				DUPLICATE_MEMBER: [409, 'একই বাবা/মায়ের অধীনে এই নামের সদস্য আগে থেকেই আছে।'],
+				PHOTO_ALREADY_SET: [409, 'এই member-এর ছবি আগেই যুক্ত হয়েছে।'],
 				PARENT_NOT_FOUND: [409, 'নির্বাচিত বাবা/মাকে tree-তে পাওয়া যায়নি।'],
 				PARENT_CHANGED: [409, 'Request করার পর নির্বাচিত বাবা/মায়ের tree position বদলেছে; আবার request দিন।'],
 				MEMBER_CHANGED: [409, 'Request করার পর সদস্যের অবস্থান বা নাম বদলেছে; নতুন request নিন।'],
@@ -491,11 +522,21 @@ async function run() {
 		}
 	});
 
-	app.get('/comments', authenticate({ complete: true }), async (req, res) => res.json(await comments.find().toArray()));
+	app.get('/comments', authenticate({ complete: true }), async (req, res) => res.json(await comments.find().sort({ createdAt: -1, _id: -1 }).toArray()));
 	app.post('/comments', authenticate({ complete: true }), async (req, res) => {
 		const comment = req.body;
-		if (![comment?.name, comment?.comment].every(value => typeof value === 'string' && value.trim())) return res.status(400).json({ message: 'নাম ও মন্তব্য দিন।' });
-		return res.status(201).json(await comments.insertOne({ ...comment, submittedBy: req.profile._id, createdAt: new Date() }));
+		if (![comment?.name, comment?.comment].every(value => typeof value === 'string' && value.trim()) || comment.name.trim().length > 120 || comment.comment.trim().length > 2000 || (comment.number && (typeof comment.number !== 'string' || comment.number.length > 30))) {
+			return res.status(400).json({ message: 'নাম ও ২০০০ অক্ষরের মধ্যে মন্তব্য দিন।' });
+		}
+		const createdAt = new Date();
+		const result = await comments.insertOne({ name: comment.name.trim(), number: comment.number?.trim() || '', comment: comment.comment.trim(), submittedBy: req.profile._id, createdAt });
+		return res.status(201).json({ _id: result.insertedId, name: comment.name.trim(), number: comment.number?.trim() || '', comment: comment.comment.trim(), createdAt });
+	});
+	app.delete('/comments/:id', authenticate({ complete: true, admin: true }), async (req, res) => {
+		if (!ObjectId.isValid(req.params.id)) return res.status(400).json({ message: 'সঠিক মন্তব্য নির্বাচন করুন।' });
+		const result = await comments.deleteOne({ _id: new ObjectId(req.params.id) });
+		if (result.deletedCount !== 1) return res.status(404).json({ message: 'মন্তব্যটি পাওয়া যায়নি।' });
+		return res.json({ message: 'মন্তব্য সরানো হয়েছে।' });
 	});
 
 	app.get('/', (req, res) => res.send('Welcome to genealogy server'));
