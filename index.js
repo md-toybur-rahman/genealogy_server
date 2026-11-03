@@ -68,9 +68,7 @@ async function verifyFirebaseToken(req) {
 }
 
 function profileComplete(profile) {
-	return Boolean(profile?.name?.trim() && profile?.bangla_name?.trim() && (profile?.is_family_member === true || profile?.fathers_name?.trim()) &&
-		profile?.phone_number?.trim() && normalizePhotoUrl(profile?.photoURL) && ['public', 'private'].includes(profile.phone_visibility) &&
-		typeof profile.is_family_member === 'boolean' && (!profile.is_family_member || (typeof profile.family_member_id === 'string' && profile.family_member_id.trim())));
+	return Boolean(profile?.name?.trim() && profile?.fathers_name?.trim() && profile?.phone_number?.trim());
 }
 
 function isValidPath(path) {
@@ -268,32 +266,14 @@ async function run() {
 	});
 
 	app.put('/users/me', authenticate(), async (req, res) => {
-		const { name, bangla_name, fathers_name, phone_number, phone_visibility, photoURL, is_family_member, family_member_id } = req.body || {};
-		if (typeof is_family_member !== 'boolean' || !['public', 'private'].includes(phone_visibility) ||
-			typeof phone_number !== 'string' || !phone_number.trim() || phone_number.trim().length > 120 || !normalizePhotoUrl(photoURL)) {
-			return res.status(400).json({ message: 'পরিবারের সদস্য কি না, মোবাইল, ছবি ও privacy নির্বাচন পূরণ করুন।' });
-		}
-		let profileNames;
-		if (is_family_member) {
-			if (typeof family_member_id !== 'string') return res.status(400).json({ message: 'পরিবারের তালিকা থেকে নিজের নাম বেছে নিন।' });
-			const [enRoot, bnRoot] = await Promise.all([englishTree.findOne({}), banglaTree.findOne({})]);
-			profileNames = listFamilyMembers(enRoot, bnRoot).find(member => member.family_member_id === family_member_id);
-			if (!profileNames) return res.status(400).json({ message: 'পরিবারের তালিকায় সদস্যটিকে পাওয়া যায়নি। Tree refresh করে আবার বেছে নিন।' });
-		} else {
-			const values = [name, bangla_name, fathers_name];
-			if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120)) {
-				return res.status(400).json({ message: 'নিজের English ও বাংলা নাম এবং বাবার নাম দিন।' });
-			}
-			profileNames = { name: name.trim(), bangla_name: bangla_name.trim(), fathers_name: fathers_name.trim() };
-		}
-		const normalizedPhotoURL = normalizePhotoUrl(photoURL);
-		if (req.profile.is_family_member && normalizePhotoUrl(req.profile.photoURL) && normalizePhotoUrl(req.profile.photoURL) !== normalizedPhotoURL) {
-			return res.status(409).json({ message: 'পরিবারের tree-তে যুক্ত ছবিটি বদলাতে member-এর photo modal থেকে request পাঠান।' });
+		const { name, fathers_name: fathersName, phone_number: phoneNumber } = req.body || {};
+		const values = [name, fathersName, phoneNumber];
+		if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120)) {
+			return res.status(400).json({ message: 'নিজের নাম, বাবার নাম ও মোবাইল নম্বর দিন।' });
 		}
 		await users.updateOne({ _id: req.profile._id }, { $set: {
-			...profileNames,
-			phone_number: phone_number.trim(), phone_visibility, photoURL: normalizedPhotoURL,
-			is_family_member, family_member_id: is_family_member ? family_member_id : null, updatedAt: new Date(),
+			name: name.trim(), bangla_name: name.trim(), fathers_name: fathersName.trim(),
+			phone_number: phoneNumber.trim(), updatedAt: new Date(),
 		} });
 		return res.json({ message: 'Profile সংরক্ষণ হয়েছে।' });
 	});
