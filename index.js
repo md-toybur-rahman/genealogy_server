@@ -68,7 +68,7 @@ async function verifyFirebaseToken(req) {
 }
 
 function profileComplete(profile) {
-	return Boolean(profile?.name?.trim() && profile?.fathers_name?.trim() && profile?.phone_number?.trim());
+	return Boolean(profile?.name?.trim() && profile?.fathers_name?.trim() && profile?.phone_number?.trim() && ['public', 'private'].includes(profile.phone_visibility));
 }
 
 function isValidPath(path) {
@@ -266,14 +266,14 @@ async function run() {
 	});
 
 	app.put('/users/me', authenticate(), async (req, res) => {
-		const { name, fathers_name: fathersName, phone_number: phoneNumber } = req.body || {};
+		const { name, fathers_name: fathersName, phone_number: phoneNumber, phone_visibility: phoneVisibility } = req.body || {};
 		const values = [name, fathersName, phoneNumber];
-		if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120)) {
-			return res.status(400).json({ message: 'নিজের নাম, বাবার নাম ও মোবাইল নম্বর দিন।' });
+		if (values.some(value => typeof value !== 'string' || !value.trim() || value.trim().length > 120) || !['public', 'private'].includes(phoneVisibility)) {
+			return res.status(400).json({ message: 'নিজের নাম, বাবার নাম, মোবাইল নম্বর ও phone privacy নির্বাচন করুন।' });
 		}
 		await users.updateOne({ _id: req.profile._id }, { $set: {
 			name: name.trim(), bangla_name: name.trim(), fathers_name: fathersName.trim(),
-			phone_number: phoneNumber.trim(), updatedAt: new Date(),
+			phone_number: phoneNumber.trim(), phone_visibility: phoneVisibility, updatedAt: new Date(),
 		} });
 		return res.json({ message: 'Profile সংরক্ষণ হয়েছে।' });
 	});
